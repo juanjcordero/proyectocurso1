@@ -1,0 +1,27 @@
+# Helm values for cu-ms-payments
+# Chart: juanjcordero/helm-microservice-chart:1.0.3
+
+# Configuración básica del microservicio
+name: cu-ms-payments
+namespace: juanjcordero-dev
+imageTag: "1" # Será sobrescrito por CI/CD con --set imageTag=<value>
+port: 3000
+
+# Variables de entorno (ConfigMap)
+configMap:
+  LOG_LEVEL: "debug"
+  DATABASE_HOST: "mi-postgres-postgresql-primary.juanjcordero-dev.svc.cluster.local"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "postgres"
+  DATABASE_USER: "postgres"
+
+# Secrets (valores en base64)
+secret:
+  DATABASE_PASSWORD: TWlQYXNzd29yZFNlZ3VybzEyMw==
+
+# Horizontal Pod Autoscaler
+hpa:
+  minReplicas: 2
+  maxReplicas: 6
+  cpuUtilization: 90
+  memoryUtilization: 90
