@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Servidor HTTP simple que responde Hola Mundo y permite GET y POST a la base de datos
+Servidor HTTP simple que responde Hola Mundo y consume otro microservicio para GET/POST de usuarios
 """
 import http.server
 import socketserver
@@ -9,66 +9,57 @@ import os
 import json
 from datetime import datetime
 
-try:
-    import psycopg2
-    POSTGRES_AVAILABLE = True
-except ImportError:
-    POSTGRES_AVAILABLE = False
+import requests  # Para consumir el microservicio
 
-PORT = 3000
+PORT = 3005
 
-# Configuración de base de datos desde variables de entorno
-DB_HOST = os.environ.get('DATABASE_HOST', 'mi-postgres-postgresql-primary.juanjcordero-dev.svc.cluster.local')
-DB_PORT = os.environ.get('DATABASE_PORT', '5432')
-DB_NAME = os.environ.get('DATABASE_NAME', 'postgres')
-DB_USER = os.environ.get('DATABASE_USER', 'postgres')
-DB_PASSWORD = os.environ.get('DATABASE_PASSWORD', '')
+# URL base del microservicio que gestiona la base de datos (configurable por variable de entorno)
+MICROSERVICE_BASE_URL = os.environ.get('MICROSERVICE_URL', 'http://cu-ms-payments:3000')
 
-def get_users():
-    """Conecta a PostgreSQL y obtiene los usuarios"""
-    if not POSTGRES_AVAILABLE:
-        return {"error": "psycopg2 no está instalado"}
+def fetch_users():
+    """Consume el endpoint GET /users del microservicio"""
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            database=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD
-        )
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, name FROM users")
-        rows = cursor.fetchall()
-        users = [{"id": row[0], "name": row[1]} for row in rows]
-        cursor.close()
-        conn.close()
-        return {"users": users}
-    except Exception as e:
-        return {"error": str(e)}
+        url = f"{MICROSERVICE_BASE_URL}/users"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        return {"error": f"Fallo al consumir {url}: {str(e)}"}
 
-def add_user(name):
-    """Inserta un nuevo usuario en la base de datos"""
-    if not POSTGRES_AVAILABLE:
-        return {"error": "psycopg2 no está instalado"}
+def create_user(payload):
+    """Consume el endpoint POST /users del microservicio, enviando el JSON recibido"""
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            database=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD
-        )
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (name) VALUES (%s) RETURNING id", (name,))
-        new_id = cursor.fetchone()[0]
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return {"message": "Usuario creado correctamente", "id": new_id, "name": name}
-    except Exception as e:
-        return {"error": str(e)}
+        url = f"{MICROSERVICE_BASE_URL}/users"
+        resp = requests.post(url, json=payload, timeout=5)
+        resp.raise_for_status()
+        # Muchas APIs devuelven 201 Created; si no, manejamos genéricamente
+        return resp.status_code, resp.json()
+    except requests.exceptions.HTTPError as e:
+        # Si el microservicio responde 4xx/5xx, propagamos el código y mensaje
+        status = e.response.status_code if e.response is not None else 500
+        try:
+            body = e.response.json()
+        except Exception:
+            body = {"error": f"HTTP error {status}: {str(e)}"}
+        return status, body
+    except requests.exceptions.RequestException as e:
+        return 500, {"error": f"Fallo al consumir {url}: {str(e)}"}
 
 class HolaMundoHandler(http.server.SimpleHTTPRequestHandler):
+    # --- Helpers ---
+    def _send_text_response(self, text, status=200):
+        self.send_response(status)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(text.encode('utf-8'))
+
+    def _send_json_response(self, obj, status=200):
+        self.send_response(status)
+        self.send_header('Content-type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps(obj).encode('utf-8'))
+
+    # --- Métodos HTTP ---
     def do_GET(self):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] Solicitud GET recibida", file=sys.stdout)
@@ -81,13 +72,12 @@ class HolaMundoHandler(http.server.SimpleHTTPRequestHandler):
         elif self.path == '/readiness':
             self._send_text_response('OK')
         elif self.path == '/users':
-            result = get_users()
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps(result).encode('utf-8'))
+            print(f"[{timestamp}] se llamó al endpoint /users (GET -> microservicio)", file=sys.stdout)
+            sys.stdout.flush()
+            result = fetch_users()
+            self._send_json_response(result, status=200)
         else:
-            self._send_text_response('<h1>Hola Mundo desde el MS2</h1>')
+            self._send_text_response('<h1>Hola Mundo desde MS1</h1>')
 
     def do_POST(self):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -95,38 +85,31 @@ class HolaMundoHandler(http.server.SimpleHTTPRequestHandler):
         print(f"[{timestamp}] Path: {self.path}", file=sys.stdout)
 
         if self.path == '/users':
+            # Leer el cuerpo
             content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
+            raw = self.rfile.read(content_length) if content_length > 0 else b''
             try:
-                data = json.loads(body)
-                name = data.get('name')
-                if not name:
-                    self.send_response(400)
-                    self.send_header('Content-type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"error": "Falta el campo 'name'"}).encode('utf-8'))
-                    return
-
-                result = add_user(name)
-                self.send_response(201)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps(result).encode('utf-8'))
+                data = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
-                self.send_response(400)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "JSON inválido"}).encode('utf-8'))
+                self._send_json_response({"error": "JSON inválido"}, status=400)
+                return
+
+            # Validación mínima: requerir 'name', igual que el microservicio habitual
+            if "name" not in data or not isinstance(data["name"], str) or not data["name"].strip():
+                self._send_json_response({"error": "Debe enviar el campo 'name' (string no vacío)"}, status=400)
+                return
+
+            print(f"[{timestamp}] se llamó al endpoint /users (POST -> microservicio) payload={data}", file=sys.stdout)
+            sys.stdout.flush()
+
+            status, result = create_user(data)
+            # Propagar el status que devuelve el microservicio (p.ej., 201 Created)
+            self._send_json_response(result, status=status)
         else:
             self.send_response(404)
             self.end_headers()
 
-    def _send_text_response(self, text):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(text.encode('utf-8'))
-
+    # Log formateado
     def log_message(self, format, *args):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] {self.address_string()} - {format % args}", file=sys.stdout)

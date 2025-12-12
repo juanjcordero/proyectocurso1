@@ -5,15 +5,15 @@
 name: cu-ms-payments
 namespace: juanjcordero-dev
 imageTag: "1" # Será sobrescrito por CI/CD con --set imageTag=<value>
-port: 3000
+port: 3005
 
 # Variables de entorno (ConfigMap)
 configMap:
   LOG_LEVEL: "debug"
-  DATABASE_HOST: "mi-postgres-postgresql-primary.juanjcordero-dev.svc.cluster.local"
-  DATABASE_PORT: "5432"
-  DATABASE_NAME: "postgres"
-  DATABASE_USER: "postgres"
+  MICROSERVICE_URL: "http://cu-ms-payments:3000"  # URL del microservicio 2
+
+  # Secrets (valores en base64)
+
 
 # Secrets (valores en base64)
 secret:
